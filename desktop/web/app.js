@@ -51,14 +51,16 @@ const state = {
   engine: null,
   /** Shown in the status line until the next action, e.g. why the microphone did not start. */
   notice: null,
+  /** True while the browser is asking for microphone access. */
+  pendingMicRequest: false,
   reference: new SpeakerReference(),
 };
 
 let audio = null;            // AudioContext, at 16 kHz when the browser allows
-let worklet = null;          // hands the sound to the page in chunks
+let worklet = null;          // the sound input node: AudioWorklet, or the older kind as a fallback
 let monitor = null;          // lets a recording be heard; the microphone stays muted
 let microphone = null;
-let mediaStream = null;
+let mediaStreams = [];       // every stream the browser granted, so all can be stopped
 let recording = null;
 let gate = new SpeechGate();
 let capturing = false;
@@ -120,21 +122,98 @@ function saveSettings(settings) {
 // ---------- Listening ----------
 
 async function ensureAudio() {
-  if (audio) return audio;
+  // A half-initialized context (the module failed to load last time) is started over,
+  // so a retry never connects anything to a missing node.
+  if (audio && worklet) return audio;
+  await teardownAudio();
+
   try {
     audio = new AudioContext({ sampleRate: RATE, latencyHint: "interactive" });
   } catch (error) {
     audio = new AudioContext({ latencyHint: "interactive" });
     addLog(`частота ${RATE} Гц не поддерживается, работаю на ${audio.sampleRate} Гц`);
   }
-  await audio.audioWorklet.addModule("./capture-worklet.js");
-  worklet = new AudioWorkletNode(audio, "capture-processor", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+
+  let input = null;
+  try {
+    if (audio.audioWorklet) {
+      await audio.audioWorklet.addModule("./capture-worklet.js");
+      const node = new AudioWorkletNode(audio, "capture-processor",
+        { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.port.onmessage = (event) => onChunk(event.data);
+      input = node;
+    }
+  } catch (error) {
+    // A browser extension can block the module: fall back to the older sound path.
+    addLog(`звуковой модуль страницы не загрузился (${error.message}), включаю запасной`);
+    input = null;
+  }
+
+  if (!input) {
+    if (typeof audio.createScriptProcessor !== "function") {
+      await teardownAudio();
+      throw new Error("браузер не даёт странице слушать звук. Обнови страницу (F5) или попробуй другой браузер — Chrome или Edge");
+    }
+    const node = audio.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (event) => {
+      // The buffer is reused by the browser: keep a copy.
+      onChunk(Float32Array.from(event.inputBuffer.getChannelData(0)));
+    };
+    input = node;
+  }
+
   monitor = audio.createGain();
   monitor.gain.value = 0;
-  worklet.connect(monitor);
+  input.connect(monitor);
   monitor.connect(audio.destination);
-  worklet.port.onmessage = (event) => onChunk(event.data);
+  worklet = input;
   return audio;
+}
+
+async function teardownAudio() {
+  if (microphone) {
+    microphone.disconnect();
+    microphone = null;
+  }
+  if (worklet) {
+    try {
+      worklet.disconnect();
+    } catch (error) {
+      // It may already be disconnected.
+    }
+    worklet = null;
+  }
+  if (monitor) {
+    try {
+      monitor.disconnect();
+    } catch (error) {
+      // Same.
+    }
+    monitor = null;
+  }
+  if (audio) {
+    try {
+      await audio.close();
+    } catch (error) {
+      // Same.
+    }
+    audio = null;
+  }
+}
+
+/** Runs the promise, but gives up after `milliseconds` with a message of its own. */
+async function withTimeout(promise, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function microphoneConstraints(processing, deviceId, askRate) {
@@ -179,13 +258,21 @@ async function requestMicrophone() {
 
 async function startMicrophone() {
   listenButton.disabled = true;
-  statusElement.textContent = "Запрашиваю доступ к микрофону…";
+  state.pendingMicRequest = true;
+  renderStatus();
   try {
     const context = await ensureAudio();
     await releaseSources();
-    mediaStream = await requestMicrophone();
+    const pending = requestMicrophone();
+    // A stream the browser grants after we have already given up must not stay alive.
+    pending.then((late) => mediaStreams.push(late)).catch(() => {});
+    const stream = await withTimeout(pending, 20000,
+      "браузер не ответил на запрос микрофона. Возможно, окно разрешения закрылось — нажми ещё раз и разреши доступ");
     await context.resume();
-    microphone = context.createMediaStreamSource(mediaStream);
+    if (!worklet) {
+      throw new Error("звуковой модуль страницы не загрузился. Обнови страницу (F5) и попробуй ещё раз");
+    }
+    microphone = context.createMediaStreamSource(stream);
     microphone.connect(worklet);
     beginCapture("microphone");
     await refreshDevices();
@@ -195,6 +282,7 @@ async function startMicrophone() {
     state.notice = `Микрофон не включился: ${error.message}.`;
     addLog(`микрофон не включился: ${error.message}`);
   } finally {
+    state.pendingMicRequest = false;
     listenButton.disabled = false;
     renderStatus();
     renderListenButton();
@@ -241,10 +329,10 @@ async function releaseSources() {
     microphone.disconnect();
     microphone = null;
   }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop());
-    mediaStream = null;
+  for (const stream of mediaStreams) {
+    stream.getTracks().forEach((track) => track.stop());
   }
+  mediaStreams = [];
   if (monitor) monitor.gain.value = 0;
 }
 
@@ -647,6 +735,7 @@ function renderStatus() {
 }
 
 function statusText() {
+  if (state.pendingMicRequest) return "Запрашиваю доступ к микрофону…";
   if (state.notice) return state.notice;
 
   const engine = state.engine;
