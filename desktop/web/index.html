@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Расшифровка урока</title>
+  <link rel="stylesheet" href="./fonts/fonts.css">
+  <link rel="stylesheet" href="./app.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="title">Расшифровка урока</h1>
+    <p id="status" class="status" role="status">Загружаю…</p>
+  </header>
+
+  <main class="layout">
+    <section class="board" aria-label="Расшифровка речи">
+      <div class="meter">
+        <div class="meter-track" aria-hidden="true">
+          <div id="meter-fill" class="meter-fill"></div>
+          <div id="meter-mark" class="meter-mark"></div>
+        </div>
+        <p id="meter-text" class="meter-text"></p>
+      </div>
+
+      <p id="hint" class="hint" hidden></p>
+      <ol id="transcript" class="transcript" aria-label="Реплики"></ol>
+      <p id="partial" class="partial" aria-live="polite"></p>
+    </section>
+
+    <aside class="panel" aria-label="Управление">
+      <div class="actions">
+        <button id="listen-button" class="listen-button" type="button">Слушать микрофон</button>
+        <button id="file-button" class="quiet-button" type="button">Открыть запись…</button>
+        <input id="file-input" type="file" accept="audio/*" hidden>
+        <label class="check"><input id="monitor" type="checkbox" checked> Проигрывать запись вслух</label>
+      </div>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Микрофон</h2>
+        <label class="field"><span>Устройство</span><select id="device"><option value="">Как в системе</option></select></label>
+        <label class="field"><span>Обработка звука</span>
+          <select id="processing">
+            <option value="standard">Обычная, с шумодавом</option>
+            <option value="raw">Без обработки</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Разделение реплик</h2>
+        <label class="field">
+          <span>Чувствительность: <output id="margin-output">8</output> дБ выше шума</span>
+          <input id="margin" type="range" min="4" max="20" step="1">
+        </label>
+        <label class="field">
+          <span>Пауза между репликами: <output id="pause-output">0,8</output> с</span>
+          <input id="pause" type="range" min="0.3" max="2" step="0.1">
+        </label>
+      </section>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Оформление</h2>
+        <label class="field">
+          <span>Размер шрифта: <output id="font-output">21</output></span>
+          <input id="font-size" type="range" min="16" max="34" step="1">
+        </label>
+      </section>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Распознавание</h2>
+        <p id="engine" class="engine">Узнаю…</p>
+      </section>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Расшифровка</h2>
+        <div class="row-of-buttons">
+          <button id="export-button" class="quiet-button" type="button">Сохранить в файл</button>
+          <button id="clear-button" class="quiet-button" type="button">Очистить</button>
+          <button id="log-button" class="quiet-button" type="button">Журнал</button>
+        </div>
+        <div id="log-box" class="log-box" hidden>
+          <pre id="log" class="log"></pre>
+          <button id="copy-log-button" class="quiet-button" type="button">Скопировать журнал</button>
+        </div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="menu" class="menu" role="menu" hidden></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

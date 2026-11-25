@@ -1,0 +1,10 @@
+{
+  "name": "livetranscriber-desktop",
+  "private": true,
+  "type": "module",
+  "description": "Desktop port of LiveTranscriber: local speech transcription in the browser",
+  "scripts": {
+    "start": "python server.py",
+    "test": "node --test tests/"
+  }
+}

@@ -5,4 +5,7 @@ DerivedData/
 build/
 *.ipa
 *.xcarchive
+__pycache__/
+desktop/runtime/
+desktop/cache/
 .DS_Store
