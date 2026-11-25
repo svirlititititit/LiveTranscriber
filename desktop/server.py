@@ -39,8 +39,10 @@ THREADS = os.environ.get("LIVETRANSCRIBER_THREADS", "4")
 
 SAMPLE_RATE = 16000
 MAX_AUDIO_BYTES = 32 * 1024 * 1024
+MAX_LLM_BYTES = 6 * 1024 * 1024
 READY_TIMEOUT_SECONDS = 180
 RECOGNIZE_TIMEOUT_SECONDS = 180
+LLM_TIMEOUT_SECONDS = 115
 # Requests are answered only by the local program, never through a proxy or VPN.
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -286,6 +288,59 @@ def tail_of(log_path):
     return "Последние строки журнала: " + " | ".join(lines[-4:])
 
 
+def describe_upstream_error(code, detail):
+    """A short human-readable reason from the API's error body."""
+    try:
+        payload = json.loads(detail)
+        message = payload.get("error")
+        if isinstance(message, dict):
+            message = message.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    except ValueError:
+        pass
+    text = " ".join(detail.split())
+    if text:
+        return f"код {code}: {text[:300]}"
+    if code == 401:
+        return "ключ не принят (код 401): проверь ключ API"
+    if code == 404:
+        return "адрес или модель не найдены (код 404): проверь адрес и имя модели"
+    return f"код {code}"
+
+
+def delta_text(line):
+    """The text carried by one line of the API's event stream, if any."""
+    text = line.decode("utf-8", "replace").strip()
+    if not text.startswith("data:"):
+        return None
+    payload = text[5:].strip()
+    if not payload or payload == "[DONE]":
+        return None
+    try:
+        event = json.loads(payload)
+    except ValueError:
+        return None
+    choices = event.get("choices") or []
+    if not choices:
+        return None
+    delta = choices[0].get("delta") or {}
+    return delta.get("content") or None
+
+
+def whole_answer(body):
+    """The complete answer when the service ignored streaming."""
+    try:
+        event = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        return None
+    choices = event.get("choices") or []
+    if not choices:
+        return None
+    message = choices[0].get("message") or {}
+    return message.get("content") or None
+
+
 def status(engine):
     return {
         "ready": engine.is_ready,
@@ -332,6 +387,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path, _, query = self.path.partition("?")
+        if path == "/api/llm":
+            return self.handle_llm()
         if path != "/api/recognize":
             return self.send_json({"error": "not found"}, 404)
 
@@ -358,6 +415,95 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    # The neural part: the page asks, this forwards to the configured API
+    # (OpenAI-compatible /chat/completions) and streams the answer back as plain text.
+
+    def handle_llm(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_LLM_BYTES:
+            return self.send_json({"error": "unexpected request size"}, 400)
+        try:
+            request = json.loads(self.rfile.read(length))
+        except ValueError:
+            return self.send_json({"error": "не получилось прочитать запрос"}, 400)
+
+        endpoint = str(request.get("endpoint") or "").strip()
+        key = str(request.get("key") or "").strip()
+        model = str(request.get("model") or "").strip()
+        messages = request.get("messages")
+        if not endpoint or not key or not model or not isinstance(messages, list):
+            return self.send_json({"error": "заполни адрес, ключ и модель нейросети в настройках"}, 400)
+        if not endpoint.lower().startswith(("http://", "https://")):
+            return self.send_json({"error": "адрес должен начинаться с http:// или https://"}, 400)
+
+        if endpoint.rstrip("/").endswith("chat/completions"):
+            url = endpoint
+        else:
+            url = endpoint.rstrip("/") + "/chat/completions"
+
+        payload = {"model": model, "messages": messages, "stream": True}
+        for name in ("temperature", "max_tokens"):
+            if request.get(name) is not None:
+                payload[name] = request[name]
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        upstream = urllib.request.Request(url, data=body, method="POST", headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+            "Accept": "text/event-stream",
+        })
+
+        # Unlike the local recognizer, the neural service may need the system proxy or VPN.
+        try:
+            response = urllib.request.build_opener().open(upstream, timeout=LLM_TIMEOUT_SECONDS)
+        except urllib.error.HTTPError as error:
+            detail = error.read(4000).decode("utf-8", "replace")
+            summary = describe_upstream_error(error.code, detail)
+            report(f"Нейросеть ответила ошибкой {error.code}: {summary[:160]}")
+            return self.send_json({"error": summary}, 502)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
+            reason = str(getattr(error, "reason", None) or error)
+            report(f"Нейросеть недоступна: {reason}")
+            return self.send_json({"error": f"нейросеть недоступна: {reason}"}, 502)
+
+        with response:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+            sent_any = False
+            carried = b""
+            whole = b""
+            try:
+                while True:
+                    chunk = response.read(1024)
+                    if not chunk:
+                        break
+                    carried += chunk
+                    whole += chunk
+                    while b"\n" in carried:
+                        line, carried = carried.split(b"\n", 1)
+                        piece = delta_text(line)
+                        if piece:
+                            sent_any = True
+                            self.wfile.write(piece.encode("utf-8"))
+                            self.wfile.flush()
+                piece = delta_text(carried)
+                if piece:
+                    sent_any = True
+                    self.wfile.write(piece.encode("utf-8"))
+                    self.wfile.flush()
+            except (TimeoutError, OSError, ValueError) as error:
+                report(f"Поток от нейросети оборвался: {error}")
+                return
+
+            if not sent_any:
+                # The service ignored streaming: send the whole answer at once.
+                text = whole_answer(whole)
+                if text:
+                    self.wfile.write(text.encode("utf-8"))
+                    self.wfile.flush()
 
     def log_message(self, format, *args):
         # The page's own requests are reported above; keep the console quiet.

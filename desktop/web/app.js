@@ -5,6 +5,7 @@
 import { resample } from "./dsp.js";
 import { SpeechGate } from "./gate.js";
 import { extractVoiceprint, SpeakerReference } from "./voiceprint.js";
+import { answerMessages, detectorMessages, parseDecision } from "./llm.js";
 
 const RATE = 16000;
 const MAX_SEGMENT_SECONDS = 50;
@@ -13,6 +14,11 @@ const DRAFT_SECONDS = 2;
 const MAX_SEGMENTS = 500;
 const LOG_CAPACITY = 300;
 const STORAGE_KEY = "livetranscriber.v1";
+const KEY_STORAGE = "livetranscriber.key";
+const BOOK_STORAGE = "livetranscriber.book";
+/** A book longer than this is kept only for the current session: it does not fit in the browser storage. */
+const BOOK_STORAGE_LIMIT = 1200000;
+const ANSWER_CARDS_LIMIT = 12;
 
 const DEFAULT_SETTINGS = Object.freeze({
   micProcessing: "standard",
@@ -20,6 +26,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   marginDb: 8,
   pauseSeconds: 0.8,
   fontSize: 21,
+  llmEndpoint: "https://api.z.ai/api/paas/v4/",
+  llmDetectorModel: "glm-4.5-flash",
+  llmAnswerModel: "glm-4.5-flash",
 });
 
 const SPEAKER_NAMES = { teacher: "Учитель", other: "Другой", unknown: "Кто говорил?" };
@@ -53,6 +62,10 @@ const state = {
   notice: null,
   /** True while the browser is asking for microphone access. */
   pendingMicRequest: false,
+  /** The API key, stored apart from the transcript. */
+  llmKey: "",
+  /** The attached text of the work being studied: `{name, text}`. */
+  book: { name: "", text: "" },
   reference: new SpeakerReference(),
 };
 
@@ -83,6 +96,11 @@ function load() {
       state.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
       if (Array.isArray(saved.segments)) state.segments = saved.segments;
     }
+    state.llmKey = localStorage.getItem(KEY_STORAGE) || "";
+    const book = JSON.parse(localStorage.getItem(BOOK_STORAGE) || "null");
+    if (book && typeof book.text === "string") {
+      state.book = { name: String(book.name || ""), text: book.text };
+    }
   } catch (error) {
     addLog(`сохранённое не прочиталось: ${error.message}`);
   }
@@ -111,6 +129,13 @@ function applySettings() {
   byId("font-output").textContent = settings.fontSize;
   byId("processing").value = settings.micProcessing;
   byId("device").value = settings.deviceId;
+
+  byId("llm-endpoint").value = settings.llmEndpoint;
+  byId("llm-detector").value = settings.llmDetectorModel;
+  byId("llm-answer").value = settings.llmAnswerModel;
+  byId("llm-key").value = state.llmKey;
+  renderLLMStatus();
+  renderBookStatus();
 }
 
 function saveSettings(settings) {
@@ -482,6 +507,247 @@ async function recognize(samples, isDraft) {
   }
 }
 
+// ---------- The neural part: notice the teacher's question and answer it ----------
+
+const answersElement = byId("answers");
+const llmStatusElement = byId("llm-status");
+const bookStatusElement = byId("book-status");
+let answerAbort = null;
+/** The verdict is asked after every utterance; while one check is running, the next waits. */
+let detectorChain = Promise.resolve();
+
+/** Sends one request through the local server to the configured API. Streams by default. */
+async function callLLM({ model, messages, onDelta, signal }) {
+  const response = await fetch("/api/llm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      endpoint: state.settings.llmEndpoint,
+      key: state.llmKey,
+      model,
+      messages,
+      stream: true,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || `сервер вернул ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let full = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    full += chunk;
+    if (onDelta && chunk) onDelta(chunk);
+  }
+  return full.trim();
+}
+
+/** After each new utterance: asks whether the teacher just asked a question. */
+function considerSegment(segment) {
+  if (!state.llmKey) return;
+
+  detectorChain = detectorChain
+    .then(async () => {
+      const answer = await callLLM({
+        model: state.settings.llmDetectorModel,
+        messages: detectorMessages(state.segments),
+      });
+      const isQuestion = parseDecision(answer);
+      if (isQuestion === null) {
+        addLog(`определитель вопроса ответил непонятно: ${answer.slice(0, 80)}`);
+      } else if (isQuestion) {
+        addLog(`вопрос учителя: ${segment.text.slice(0, 60)}`);
+        askNeural(segment.text);
+      }
+    })
+    .catch((error) => {
+      if (error.name !== "AbortError") {
+        addLog(`проверка на вопрос не удалась: ${error.message}`);
+      }
+    });
+}
+
+/** Answers a question and shows the answer in a red card. */
+async function askNeural(question) {
+  if (!state.llmKey) {
+    addLog("нет ключа нейросети — ответ невозможен");
+    return;
+  }
+  // The newest question is the important one; an older answer is dropped.
+  if (answerAbort) answerAbort.abort();
+  const controller = new AbortController();
+  answerAbort = controller;
+
+  const card = addAnswerCard(question);
+  const started = performance.now();
+  try {
+    await callLLM({
+      model: state.settings.llmAnswerModel,
+      messages: answerMessages(question, state.segments, state.book.text ? state.book : null),
+      onDelta: (chunk) => card.append(chunk),
+      signal: controller.signal,
+    });
+    card.done(Math.round(performance.now() - started));
+    addLog(`ответ нейросети готов за ${((performance.now() - started) / 1000).toFixed(1)} с`);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      card.discard();
+      return;
+    }
+    card.fail(error.message);
+    addLog(`нейросеть не ответила: ${error.message}`);
+  }
+}
+
+/** The red answer card, newest on top. */
+function addAnswerCard(question) {
+  const card = document.createElement("article");
+  card.className = "answer-card";
+
+  const head = document.createElement("div");
+  head.className = "answer-head";
+  const label = document.createElement("span");
+  label.className = "answer-label";
+  label.textContent = "Ответ";
+  const quote = document.createElement("span");
+  quote.className = "answer-question";
+  quote.textContent = question;
+  head.append(label, quote);
+
+  const text = document.createElement("p");
+  text.className = "answer-text is-pending";
+  text.textContent = "…";
+  card.append(head, text);
+
+  answersElement.prepend(card);
+  while (answersElement.children.length > ANSWER_CARDS_LIMIT) {
+    answersElement.lastChild.remove();
+  }
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+
+  return {
+    append(chunk) {
+      if (text.classList.contains("is-pending")) {
+        text.classList.remove("is-pending");
+        text.textContent = "";
+      }
+      text.textContent += chunk;
+    },
+    done(milliseconds) {
+      const note = document.createElement("p");
+      note.className = "answer-note";
+      note.textContent = `нейросеть, ${state.settings.llmAnswerModel}, ${(milliseconds / 1000).toFixed(1).replace(".", ",")} с`;
+      card.append(note);
+    },
+    fail(message) {
+      card.classList.add("is-error");
+      text.classList.remove("is-pending");
+      text.textContent = `Не получилось: ${message}`;
+    },
+    discard() {
+      card.remove();
+    },
+  };
+}
+
+async function checkLLMConnection() {
+  if (!state.llmKey) {
+    llmStatusElement.textContent = "Сначала вставь ключ API.";
+    llmStatusElement.classList.add("is-alert");
+    return;
+  }
+  llmStatusElement.classList.remove("is-alert");
+  llmStatusElement.textContent = "Проверяю связь…";
+  try {
+    const answer = await callLLM({
+      model: state.settings.llmDetectorModel,
+      messages: [{ role: "user", content: "Ответь одним словом: связь есть." }],
+    });
+    llmStatusElement.textContent = `Работает. Модель ответила: «${answer.slice(0, 60)}»`;
+  } catch (error) {
+    llmStatusElement.classList.add("is-alert");
+    llmStatusElement.textContent = `Не работает: ${error.message}`;
+  }
+}
+
+function renderLLMStatus() {
+  llmStatusElement.classList.toggle("is-alert", !state.llmKey);
+  llmStatusElement.textContent = state.llmKey
+    ? `Готова отвечать: ${state.settings.llmAnswerModel}.`
+    : "Ключ не задан — ответы выключены.";
+}
+
+function renderBookStatus() {
+  if (!state.book.text) {
+    bookStatusElement.textContent = "Текст не приложен.";
+    return;
+  }
+  const characters = state.book.text.length.toLocaleString("ru-RU");
+  const inStorage = state.book.text.length <= BOOK_STORAGE_LIMIT ? "" : " (большой, хранится до перезагрузки страницы)";
+  bookStatusElement.textContent = `«${state.book.name}», ${characters} знаков${inStorage}.`;
+}
+
+/** Reads a text file, guessing between UTF-8 and Windows-1251. */
+async function loadBookFile(file) {
+  const buffer = await file.arrayBuffer();
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch (error) {
+    try {
+      text = new TextDecoder("windows-1251").decode(buffer);
+    } catch (inner) {
+      addLog(`«${file.name}» не читается как текст`);
+      return;
+    }
+  }
+  text = text.replace(/\r\n/g, "\n").trim();
+  if (!text) {
+    addLog(`«${file.name}» пуст`);
+    return;
+  }
+
+  state.book = { name: file.name.replace(/\.[^.]+$/, ""), text };
+  persistBook();
+  renderBookStatus();
+  addLog(`приложено произведение «${state.book.name}»: ${text.length} знаков`);
+}
+
+function clearBook() {
+  state.book = { name: "", text: "" };
+  localStorage.removeItem(BOOK_STORAGE);
+  renderBookStatus();
+  addLog("текст произведения убран");
+}
+
+function persistBook() {
+  if (state.book.text.length > BOOK_STORAGE_LIMIT) return;
+  try {
+    localStorage.setItem(BOOK_STORAGE, JSON.stringify(state.book));
+  } catch (error) {
+    addLog(`произведение не сохранилось: ${error.message}`);
+  }
+}
+
+function persistKey() {
+  try {
+    if (state.llmKey) {
+      localStorage.setItem(KEY_STORAGE, state.llmKey);
+    } else {
+      localStorage.removeItem(KEY_STORAGE);
+    }
+  } catch (error) {
+    addLog(`ключ не сохранился: ${error.message}`);
+  }
+}
+
 function requestVoiceprint(samples) {
   if (!voiceWorker) return Promise.resolve(extractVoiceprint(samples, RATE));
   return new Promise((resolve, reject) => {
@@ -564,6 +830,7 @@ function publish(utterance, result, voiceprint, floorDb) {
   removeEmptyMessage();
   renderHint();
   persist();
+  considerSegment(segment);
   if (nearEnd) row.scrollIntoView({ block: "end", behavior: "smooth" });
 }
 
@@ -882,6 +1149,16 @@ function openMenu(x, y, id) {
   });
   menuElement.append(copy);
 
+  const ask = document.createElement("button");
+  ask.type = "button";
+  ask.setAttribute("role", "menuitem");
+  ask.textContent = "Спросить у нейросети";
+  ask.addEventListener("click", () => {
+    closeMenu();
+    askNeural(segment.text);
+  });
+  menuElement.append(ask);
+
   menuElement.hidden = false;
   const box = menuElement.getBoundingClientRect();
   menuElement.style.left = `${Math.min(x, window.innerWidth - box.width - 8)}px`;
@@ -948,6 +1225,30 @@ function wire() {
     if (state.source === "microphone") startMicrophone();
   });
 
+  byId("llm-endpoint").addEventListener("change", (event) => {
+    saveSettings({ llmEndpoint: event.target.value.trim() });
+    renderLLMStatus();
+  });
+  byId("llm-detector").addEventListener("change", (event) => saveSettings({ llmDetectorModel: event.target.value.trim() }));
+  byId("llm-answer").addEventListener("change", (event) => {
+    saveSettings({ llmAnswerModel: event.target.value.trim() });
+    renderLLMStatus();
+  });
+  byId("llm-key").addEventListener("change", (event) => {
+    state.llmKey = event.target.value.trim();
+    persistKey();
+    renderLLMStatus();
+  });
+  byId("llm-check").addEventListener("click", checkLLMConnection);
+
+  byId("book-button").addEventListener("click", () => byId("book-input").click());
+  byId("book-input").addEventListener("change", (event) => {
+    const file = event.target.files[0];
+    event.target.value = "";
+    if (file) loadBookFile(file);
+  });
+  byId("book-clear").addEventListener("click", clearBook);
+
   byId("export-button").addEventListener("click", () => {
     const stamp = new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "");
     saveFile(`расшифровка-${stamp}.txt`, exportText());
@@ -993,6 +1294,18 @@ async function main() {
 }
 
 // For checking the app from outside and from the browser console.
-window.livetranscriber = { playUrl, playRecording, startMicrophone, stopListening, state, gate };
+window.livetranscriber = {
+  playUrl, playRecording, startMicrophone, stopListening, askNeural, state, gate,
+  /** Sets the neural settings at once; handy for testing. */
+  setLLM(partial) {
+    if (partial.endpoint !== undefined) state.settings.llmEndpoint = partial.endpoint;
+    if (partial.detector !== undefined) state.settings.llmDetectorModel = partial.detector;
+    if (partial.answerer !== undefined) state.settings.llmAnswerModel = partial.answerer;
+    if (partial.key !== undefined) state.llmKey = partial.key;
+    applySettings();
+    persist();
+    persistKey();
+  },
+};
 
 main();

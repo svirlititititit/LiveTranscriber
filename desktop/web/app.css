@@ -13,6 +13,7 @@
   --unknown: #707070;
   --alert: #ffffff;
   --ready: #8f8f8f;
+  --answer-red: #ff5f52;
   --font-text: "Literata", Georgia, "Times New Roman", serif;
   --font-hand: "Caveat", "Segoe Script", cursive;
   --text-size: 21px;
@@ -323,7 +324,10 @@ button {
   font-size: 13.5px;
 }
 
-.field select {
+.field select,
+.field input[type="url"],
+.field input[type="text"],
+.field input[type="password"] {
   width: 100%;
   padding: 5px 6px;
   border: 1px solid var(--chalk-faint);
@@ -332,6 +336,19 @@ button {
   color: var(--chalk);
   font-family: var(--font-text);
   font-size: 13.5px;
+}
+
+.field input:focus-visible,
+.field select:focus-visible {
+  outline-offset: 0;
+  border-color: var(--chalk-dim);
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  color: var(--chalk-faint);
+  font-size: 12.5px;
+  line-height: 1.45;
 }
 
 .field output {
@@ -348,6 +365,75 @@ button {
 .engine.is-alert {
   color: var(--alert);
   font-weight: 600;
+}
+
+/* The one colored thing on the page: the neural answer. */
+.answers {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.answers:empty {
+  display: none;
+}
+
+.answer-card {
+  max-width: 46rem;
+  padding: 12px 16px 14px;
+  border: 2px solid var(--answer-red);
+  border-radius: 10px;
+  background: rgba(255, 95, 82, 0.07);
+  animation: appear 180ms ease-out;
+}
+
+.answer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.answer-label {
+  font-family: var(--font-hand);
+  font-size: 27px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--answer-red);
+  white-space: nowrap;
+}
+
+.answer-question {
+  overflow-wrap: anywhere;
+  color: var(--chalk-dim);
+  font-size: 14px;
+  font-style: italic;
+}
+
+.answer-text {
+  margin: 8px 0 0;
+  font-size: var(--text-size);
+  line-height: 1.5;
+}
+
+.answer-text.is-pending {
+  color: var(--chalk-faint);
+}
+
+.answer-note {
+  margin: 6px 0 0;
+  color: var(--chalk-dim);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.answer-card.is-error {
+  border-style: dashed;
+}
+
+.answer-card.is-error .answer-text {
+  color: var(--chalk-dim);
+  font-size: 15px;
+  font-style: italic;
 }
 
 .row-of-buttons {

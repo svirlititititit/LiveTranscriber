@@ -17,6 +17,7 @@
 
   <main class="layout">
     <section class="board" aria-label="Расшифровка речи">
+      <div id="answers" class="answers" aria-live="polite"></div>
       <div class="meter">
         <div class="meter-track" aria-hidden="true">
           <div id="meter-fill" class="meter-fill"></div>
@@ -72,6 +73,38 @@
       <section class="panel-section">
         <h2 class="panel-heading">Распознавание</h2>
         <p id="engine" class="engine">Узнаю…</p>
+      </section>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Нейросеть</h2>
+        <label class="field"><span>Адрес сервиса</span>
+          <input id="llm-endpoint" type="url" spellcheck="false" autocomplete="off">
+        </label>
+        <label class="field"><span>Ключ API</span>
+          <input id="llm-key" type="password" placeholder="вставь ключ" autocomplete="off">
+        </label>
+        <label class="field"><span>Модель для вопросов</span>
+          <input id="llm-detector" type="text" spellcheck="false">
+        </label>
+        <label class="field"><span>Модель для ответов</span>
+          <input id="llm-answer" type="text" spellcheck="false">
+        </label>
+        <div class="row-of-buttons">
+          <button id="llm-check" class="quiet-button" type="button">Проверить связь</button>
+        </div>
+        <p id="llm-status" class="engine">Ключ не задан — ответы выключены.</p>
+        <p class="field-hint">Обычный ключ создаётся в консоли z.ai (раздел API Keys). Модель glm-4.5-flash бесплатная. Ключ хранится только в этом браузере.</p>
+      </section>
+
+      <section class="panel-section">
+        <h2 class="panel-heading">Произведение</h2>
+        <p id="book-status" class="engine">Текст не приложен.</p>
+        <div class="row-of-buttons">
+          <button id="book-button" class="quiet-button" type="button">Открыть текст…</button>
+          <button id="book-clear" class="quiet-button" type="button">Убрать</button>
+        </div>
+        <input id="book-input" type="file" accept=".txt,.md,.fb2,.html,text/*" hidden>
+        <p class="field-hint">Без текста произведения нейросеть отвечает по общим знаниям.</p>
       </section>
 
       <section class="panel-section">
