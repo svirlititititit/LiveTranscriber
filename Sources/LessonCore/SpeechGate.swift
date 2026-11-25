@@ -85,7 +85,9 @@ public final class SpeechGate {
             } else {
                 quietTime = 0
             }
-        } else if levelDb > thresholdDb {
+        } else if chunkDb > thresholdDb {
+            // The start is judged by the raw level: the smoothed one keeps ringing after
+            // a short click and would count it as the beginning of speech.
             loudTime += duration
             if loudTime >= settings.startHoldSeconds {
                 isSpeechActive = true
@@ -94,7 +96,7 @@ public final class SpeechGate {
                 events.append(.speechStarted)
             }
         } else {
-            loudTime = 0
+            loudTime = max(0, loudTime - duration)
         }
         return events
     }

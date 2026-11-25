@@ -23,7 +23,7 @@ final class UtteranceRecognizer {
     /// The longest text seen in the attempts that broke off.
     private var bestText = ""
     private var isFinishRequested = false
-    private var isFinished = false
+    private(set) var isFinished = false
     private var restartCount = 0
     private var fallback: DispatchWorkItem?
 

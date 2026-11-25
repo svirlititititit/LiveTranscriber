@@ -7,14 +7,14 @@ import Glibc
 @testable import LessonCore
 
 final class DSPTests: XCTestCase {
-    func testPowerSpectrumFindsTheDominantFrequency() {
+    func testPowerSpectrumFindsTheDominantFrequency() throws {
         let sampleRate: Double = 16000
         let signal = (0..<512).map { Float(sin(2 * Float.pi * 1000 * Float($0) / Float(sampleRate))) }
 
         let power = DSP.powerSpectrum(of: signal, fftSize: 512)
 
         XCTAssertEqual(power.count, 256)
-        let peak = power.indices.max { power[$0] < power[$1] }
+        let peak = try XCTUnwrap(power.indices.max { power[$0] < power[$1] })
         XCTAssertEqual(peak, 32)
     }
 
@@ -43,7 +43,7 @@ final class DSPTests: XCTestCase {
         }
     }
 
-    func testResampleKeepsLengthAndSignal() {
+    func testResampleKeepsLengthAndSignal() throws {
         let sourceRate: Double = 48000
         let signal = (0..<48000).map { Float(sin(2 * Float.pi * 400 * Float($0) / Float(sourceRate))) }
 
@@ -51,7 +51,7 @@ final class DSPTests: XCTestCase {
 
         XCTAssertEqual(resampled.count, 16000)
         let power = DSP.powerSpectrum(of: Array(resampled[0..<512]), fftSize: 512)
-        let peak = power.indices.max { power[$0] < power[$1] }
+        let peak = try XCTUnwrap(power.indices.max { power[$0] < power[$1] })
         XCTAssertTrue((11...14).contains(peak), "peak bin \(peak)")
         XCTAssertGreaterThan(resampled.map { abs($0) }.max() ?? 0, 0.9)
     }

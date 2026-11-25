@@ -86,12 +86,14 @@ final class DiagnosticsLog: ObservableObject {
         return formatter
     }()
 
-    func add(_ message: @autoclosure @escaping () -> String) {
+    /// The message is built right away, so that callers need not write `self.` everywhere.
+    func add(_ message: @autoclosure () -> String) {
+        let line = message()
         if Thread.isMainThread {
-            append(message())
+            append(line)
         } else {
             DispatchQueue.main.async {
-                self.append(message())
+                self.append(line)
             }
         }
     }

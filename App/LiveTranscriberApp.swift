@@ -8,12 +8,12 @@ struct LiveTranscriberApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(model: model)
+                .preferredColorScheme(.dark)
                 .onChange(of: scenePhase) { phase in
                     if phase == .active {
                         model.handleAppBecameActive()
                     }
                 }
         }
-        .preferredColorScheme(.dark)
     }
 }
