@@ -1,0 +1,54 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Run core tests
+        run: swift test
+
+  ipa:
+    name: Build IPA
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Archive without signing
+        run: |
+          xcodebuild -project LiveTranscriber.xcodeproj \
+            -scheme LiveTranscriber -configuration Release \
+            -sdk iphoneos -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/LiveTranscriber.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            archive -quiet
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$RUNNER_TEMP/LiveTranscriber.xcarchive/Products/Applications/LiveTranscriber.app" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP" && zip -qry LiveTranscriber.ipa Payload && ls -la LiveTranscriber.ipa
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveTranscriber-ipa
+          path: ${{ runner.temp }}/LiveTranscriber.ipa
+          retention-days: 30
